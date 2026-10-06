@@ -1,0 +1,87 @@
+# Calibration evidence bundle service with DPoP-bound access tokens.
+#
+#   docker compose up --build --exit-code-from verify verify
+#       -> builds app+verify, waits for health, runs tests/build/smoke,
+#          and exits with the verify container's exit code.
+#   docker compose up --build app
+#       -> serves the API on http://localhost:${HOST_PORT:-8080}
+#
+# Host port and public origin are configurable:
+#   HOST_PORT=9000 PUBLIC_ORIGIN=http://localhost:9000 docker compose up app
+
+services:
+  # One-shot demo key material. In production the issuer key belongs to the
+  # registered token issuer and never touches this compose file.
+  keygen:
+    build:
+      context: .
+      target: app
+    command: ["python", "-m", "app.keygen", "--public-dir", "/keys-public", "--private-dir", "/keys-private"]
+    volumes:
+      - keys-public:/keys-public
+      - keys-private:/keys-private
+    restart: "no"
+
+  app:
+    container_name: calibration-app
+    build:
+      context: .
+      target: app
+    depends_on:
+      keygen:
+        condition: service_completed_successfully
+    environment:
+      # Public origin clients use to reach this service; DPoP htu is derived
+      # from it, not from the Host header.
+      PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:-http://localhost:${HOST_PORT:-8080}}
+      TOKEN_ISSUER: ${TOKEN_ISSUER:-https://issuer.calibration-lab.example}
+      TOKEN_AUDIENCE: ${TOKEN_AUDIENCE:-calibration-bundles}
+      ISSUER_PUBLIC_KEY_FILE: /keys/issuer_es256_public.pem
+      REPLAY_DB_PATH: /data/replay.db
+      DPOP_IAT_WINDOW_SECONDS: "300"
+      TOKEN_CLOCK_SKEW_SECONDS: "30"
+      REPLAY_RETENTION_SECONDS: "86400"
+      # One to eight numbered, read-only evidence bundles + lowercase SHA-256.
+      BUNDLE_1_FILE: /bundles/bundle-1.bin
+      BUNDLE_1_SHA256: fc2f4d7d18cdb7f11b72beff8ab34e1495c4809abdb2a28ea339b817efbf5c46
+      BUNDLE_2_FILE: /bundles/bundle-2.bin
+      BUNDLE_2_SHA256: c8d234609831890ab62422511c7bf99f63d703a16393b5b40ae7b67b806f0623
+      BUNDLE_3_FILE: /bundles/bundle-3.bin
+      BUNDLE_3_SHA256: 05bbc478a57159300e0f57fff6303307b5af93f2cb01e83ca43123c5f5876531
+    volumes:
+      - ./bundles:/bundles:ro
+      - keys-public:/keys:ro
+      - replay-data:/data
+    ports:
+      - "${HOST_PORT:-8080}:8000"
+    restart: unless-stopped
+
+  verify:
+    container_name: calibration-verify
+    build:
+      context: .
+      target: verify
+    depends_on:
+      app:
+        condition: service_healthy
+    environment:
+      APP_BASE_URL: http://app:8000
+      PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:-http://localhost:${HOST_PORT:-8080}}
+      TOKEN_ISSUER: ${TOKEN_ISSUER:-https://issuer.calibration-lab.example}
+      TOKEN_AUDIENCE: ${TOKEN_AUDIENCE:-calibration-bundles}
+      PRIVATE_KEYS_DIR: /keys-private
+      BUNDLES_DIR: /bundles
+      SMOKE_BUNDLE_ID: "1"
+      APP_CONTAINER_NAME: calibration-app
+    volumes:
+      - keys-private:/keys-private:ro
+      - ./bundles:/bundles:ro
+      # Optional: lets verify restart the app to prove jti replay protection
+      # survives restarts. Without it that single check is skipped.
+      - /var/run/docker.sock:/var/run/docker.sock
+    restart: "no"
+
+volumes:
+  keys-public:
+  keys-private:
+  replay-data:
